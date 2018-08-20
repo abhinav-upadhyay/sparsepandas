@@ -5,8 +5,6 @@ Inspired by the IPArray implementation from [cyberpandas](https://github.com/Con
 Example Usage
 ```python
 
-In [1]: import sparse
-
 In [2]: import numpy as np
 
 In [3]: import pandas as pd
