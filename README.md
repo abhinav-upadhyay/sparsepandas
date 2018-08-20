@@ -1,1 +1,1 @@
-An extension array implementation for pandas to support sparse arrays using the sparse module.
+An extension [array](https://pandas.pydata.org/pandas-docs/stable/extending.html) implementation for pandas to support sparse arrays using the [sparse](https://sparse.pydata.org/en/latest/index.html) module.
