@@ -4,6 +4,42 @@ from pandas.api.extensions import ExtensionDtype, take
 import sparse
 import operator
 import numpy as np
+from numba import jit
+from numba.types import float64, Tuple, int64, void
+
+
+@jit(Tuple((int64[:, :], float64[:], int64))(int64[:, :], float64[:], int64, int64, float64), parallel=True, nogil=True, nopython=True)
+def _setitem(coords, data, shape, key, value):
+    data_iter = 0
+    key_copied = False
+    newlen = data.shape[0] + 1
+    new_coords = np.empty((1, newlen), dtype=np.int64)
+    new_data = np.empty(newlen)
+    for i in range(newlen):
+        if data_iter >= 0:
+            if not key_copied:
+                if coords[0][data_iter] < key:
+                    new_coords[0][i] = coords[0][data_iter]
+                    new_data[i] = data[data_iter]
+                    if data_iter < newlen - 2:
+                        data_iter += 1
+                    else:
+                        data_iter = -1
+                else:
+                    new_coords[0][i] = key
+                    new_data[i] = value
+                    key_copied = True
+            else:
+                new_coords[0][i] = coords[0][data_iter]
+                new_data[i] = data[data_iter]
+                data_iter += 1
+    if key >= data.shape[0]:
+        new_shape = shape + 1
+    else:
+        new_shape = shape
+    return new_coords, new_data, new_shape
+
+
 
 class SparseArrayType(ExtensionDtype):
     name = 'sparsetype'
@@ -17,8 +53,6 @@ class SparseArrayType(ExtensionDtype):
         else:
             raise TypeError("Cannot construct a '{}' from "
                             "'{}'".format(cls, string))
-
-
 class SparseExtensionArray(ExtensionArray):
     _dtype = SparseArrayType()
     ndim = 1
@@ -39,6 +73,7 @@ class SparseExtensionArray(ExtensionArray):
     @classmethod
     def _from_ndarray(cls, data):
         return cls(data)
+
     
     @classmethod
     def _from_pyints(cls, values):
@@ -64,16 +99,21 @@ class SparseExtensionArray(ExtensionArray):
     def _box_scalar(scalar):
         return scalar
     
+    def _setitem(self, key, value):
+        if isinstance(value, Iterable):
+            new_coords, new_data, new_shape = _setitem(self.data.coords, self.data.data, self.shape[0], key, value[0])
+        else:
+            new_coords, new_data, new_shape = _setitem(self.data.coords, self.data.data, self.shape[0], key, value)
+        self.data.coords = new_coords
+        self.data.data = new_data
+        self.data.shape = (new_shape,)
+            
     def __setitem__(self, key, value):
         # TODO if value is self.na_value, remove that index from coords and data
-        coords_shape = self.data.coords.shape
         coords = self.data.coords.ravel()
         if isinstance(key, int):
             if key not in self.data.coords:
-                self.data.coords = np.append(self.data.coords, key).reshape(coords_shape[0], self.data.coords.shape[1] + (len(key) if isinstance(key, Iterable) else 1)) 
-                self.data.data = np.append(self.data.data, value)
-                if key >= self.data.shape[0]:
-                    self.data.shape = (self.data.shape[0] + 1,)
+                self._setitem(key, value)
             else:
                 idx = np.where(coords == key)[0][0]
                 self.data.data[idx] = value
@@ -95,10 +135,7 @@ class SparseExtensionArray(ExtensionArray):
             start, end, step = indices
             for i in range(start, end, step):
                 if i not in coords:
-                    self.data.coords = np.append(self.data.coords, i).reshape(coords_shape[0], self.data.coords.shape[1] + 1)
-                    self.data.data = np.append(self.data.data, value)
-                    if i >= self.data.shape[0]:
-                        self.data.shape = (self.data.shape[0] + 1,)
+                    self._setitem(i, value)
                 else:
                     idx = np.where(coords == i)[0][0]
                     self.data.data[idx] = value
@@ -107,10 +144,7 @@ class SparseExtensionArray(ExtensionArray):
                 for ind, v in enumerate(key):
                     if v:
                         if ind not in coords:
-                            self.data.coords = np.append(self.data.coords, ind).reshape(coords_shape[0], self.data.coords.shape[1] + 1) 
-                            self.data.data = np.append(self.data.data, value)
-                            if ind >= self.data.shape[0]:
-                                self.data.shape = (self.data.shape[0] + 1,)
+                            self._setitem(ind, value)
                         else:
                             idx = np.where(coords == i)[0][0]
                             self.data.data[idx] = value
@@ -118,28 +152,15 @@ class SparseExtensionArray(ExtensionArray):
                 for k in key:
                     ind = k if k >= 0 else self.shape[0] + k
                     if ind not in coords:
-                        self.data.coords = np.append(self.data.coords, ind).reshape(coords_shape[0], self.data.coords.shape[1] + 1) 
-                        self.data.data = np.append(self.data.data, value)
-                        if ind >= self.data.shape[0]:
-                            self.data.shape = (self.data.shape[0] + 1,)
+                        self._setitem(ind, value)
                     else:
                         idx = np.where(coords == ind)[0][0]
                         self.data.data[idx] = value
 
-        #else:
-        #    self.data.data[key] = value
-
 
     def __iter__(self):
-        coords = self.data.coords.ravel()
-        for i in range(self.shape[0]):
-            idx = np.where(coords == i)[0]
-            if len(idx) > 0:
-                yield self.data.data[idx[0]]
-            else:
-               yield self.na_value
-
- 
+        for x in iter(self.data.data, self.data.coords[0], self.shape[0], self.na_value):
+            yield x
 
 
     @property
@@ -167,7 +188,7 @@ class SparseExtensionArray(ExtensionArray):
         return (len(self.data),)
     
     def __len__(self):
-        return self.data.shape[0]
+        return self.shape[0]
     
     def __getitem__(self, item):
         coords = self.data.coords.ravel()
@@ -176,13 +197,11 @@ class SparseExtensionArray(ExtensionArray):
                 item = self.shape[0] + item
             if item < self.shape[0] and item not in self.data.coords:
                 return self.na_value
-                #return np.nan
             data_row = np.where(coords == item)[0][0]
             return (self.data.data[data_row])
         elif isinstance(item, slice):
             slice_start = item.start
             slice_stop = item.stop
-            slice_step = item.step
             if slice_start and slice_start < 0:
                 slice_start = self.data.shape[0] + slice_start
             if slice_stop and slice_stop < 0:
@@ -237,7 +256,6 @@ class SparseExtensionArray(ExtensionArray):
             fill_value = self.na_value
 
         if allow_fill:
-            mask = (indices == -1)
             if not len(self):
                 if not (indices == -1).all():
                     msg = "Invalid take for empty array. Must be all -1."
@@ -272,7 +290,6 @@ class SparseExtensionArray(ExtensionArray):
                 else:
                     took[i] = fill_value
             elif ind not in coords:
-                #took[i] = fill_value
                 took[i] = self.na_value
             else:
                 data_row = np.where(coords == ind)[0][0]
@@ -282,7 +299,6 @@ class SparseExtensionArray(ExtensionArray):
     def take_nd(self, indexer, allow_fill=True, fill_value=None):
         return self.take(indexer, allow_fill=allow_fill, fill_value=fill_value)
 
-    
     def isna(self):
         nas = np.ones(self.data.shape, dtype=bool)
         nas[self.data.coords[0, :]] = False
@@ -335,6 +351,20 @@ class SparseExtensionArray(ExtensionArray):
 
 
     
-
-
+@jit(void(float64[:], int64[:], int64, float64), parallel=True, nogil=True, nopython=True)
+def iter(data, coords, length, na_value):
+    coords_len = data.shape[0]
+    coords_iter = 0 if coords_len > 0 else -1
+    i = 0
+    while i < length:
+        if coords_iter < 0 or i != coords[coords_iter]:
+            yield na_value
+        else:
+            val = data[coords_iter]
+            if coords_iter < coords_len - 1:
+                coords_iter += 1
+            else:
+                coords_iter = -1
+            yield val
+        i += 1
     
