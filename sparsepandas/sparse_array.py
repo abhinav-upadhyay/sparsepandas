@@ -34,7 +34,6 @@ class SparseExtensionArray(ExtensionArray):
             elif not isinstance(coords, np.ndarray):
                 self.data = sparse.COO(np.array(coords, dtype=float), fill_value=self.na_value)
             else:
-                #import pdb;pdb.set_trace()
                 self.data = sparse.COO(coords, fill_value=self.na_value)
     
     @classmethod
@@ -54,7 +53,8 @@ class SparseExtensionArray(ExtensionArray):
     
     
     def _formatting_values(self):
-        return (np.array([x for x in self.data.data]))
+        #return (np.array([x for x in self.data.data]))
+        return self.data.todense()
     
     def _format(self, val):
         return "%s" % ((val))
@@ -67,13 +67,67 @@ class SparseExtensionArray(ExtensionArray):
     def __setitem__(self, key, value):
         # TODO if value is self.na_value, remove that index from coords and data
         coords_shape = self.data.coords.shape
-        if key not in self.data.coords:
-            self.data.coords = np.append(self.data.coords, key).reshape(coords_shape[0], self.data.coords.shape[1] + (len(key) if isinstance(key, Iterable) else 1)) 
-            self.data.data = np.append(self.data.data, value)
-            if key >= self.data.shape[0]:
-                self.data.shape = (self.data.shape[0] + 1,)
-        else:
-            self.data.data[key] = value
+        coords = self.data.coords.ravel()
+        if isinstance(key, int):
+            if key not in self.data.coords:
+                self.data.coords = np.append(self.data.coords, key).reshape(coords_shape[0], self.data.coords.shape[1] + (len(key) if isinstance(key, Iterable) else 1)) 
+                self.data.data = np.append(self.data.data, value)
+                if key >= self.data.shape[0]:
+                    self.data.shape = (self.data.shape[0] + 1,)
+            else:
+                idx = np.where(coords == key)[0][0]
+                self.data.data[idx] = value
+        elif isinstance(key, slice):
+            slice_start = key.start
+            slice_end = key.stop
+            slice_step = slice.step
+            if slice_step and slice_step < 0:
+                slice_step = np.abs(slice_step)
+                slice_start, slice_send = slice_end, slice_start
+            if slice_start and slice_start < 0:
+                slice_start = self.shape[0] + slice_start
+            if slice_end and slice_end < 0:
+                slice_end = self.shape[0] + slice_end
+            if slice_start and not slice_end:
+                indices = key.indices(slice_start)
+            else:
+                indices = key.indices(slice_end)
+            start, end, step = indices
+            for i in range(start, end, step):
+                if i not in coords:
+                    self.data.coords = np.append(self.data.coords, i).reshape(coords_shape[0], self.data.coords.shape[1] + 1)
+                    self.data.data = np.append(self.data.data, value)
+                    if i >= self.data.shape[0]:
+                        self.data.shape = (self.data.shape[0] + 1,)
+                else:
+                    idx = np.where(coords == i)[0][0]
+                    self.data.data[idx] = value
+        elif isinstance(key, (np.ndarray)):
+            if isinstance(key[0], np.bool_):
+                for ind, v in enumerate(key):
+                    if v:
+                        if ind not in coords:
+                            self.data.coords = np.append(self.data.coords, ind).reshape(coords_shape[0], self.data.coords.shape[1] + 1) 
+                            self.data.data = np.append(self.data.data, value)
+                            if ind >= self.data.shape[0]:
+                                self.data.shape = (self.data.shape[0] + 1,)
+                        else:
+                            idx = np.where(coords == i)[0][0]
+                            self.data.data[idx] = value
+            else:
+                for k in key:
+                    ind = k if k >= 0 else self.shape[0] + k
+                    if ind not in coords:
+                        self.data.coords = np.append(self.data.coords, ind).reshape(coords_shape[0], self.data.coords.shape[1] + 1) 
+                        self.data.data = np.append(self.data.data, value)
+                        if ind >= self.data.shape[0]:
+                            self.data.shape = (self.data.shape[0] + 1,)
+                    else:
+                        idx = np.where(coords == ind)[0][0]
+                        self.data.data[idx] = value
+
+        #else:
+        #    self.data.data[key] = value
 
 
     def __iter__(self):
@@ -95,6 +149,14 @@ class SparseExtensionArray(ExtensionArray):
     def _from_factorized(cls, values, original):
         return cls(values)
     
+    def factorize(self, na_sentinel=-1):
+        uniques = self.unique()
+        unique_indices = {u:ind for ind, u in enumerate(uniques)}
+        coords = self.data.coords.ravel()
+        coords_set = set(coords.tolist())
+        indices = [unique_indices[self.data.data[np.where(coords == i)[0][0]]] if i in coords_set else na_sentinel for i in range(self.shape[0]) ]
+        return np.array(indices), uniques
+    
     @property
     def shape(self):
         return (len(self.data),)
@@ -112,12 +174,56 @@ class SparseExtensionArray(ExtensionArray):
                 #return np.nan
             data_row = np.where(coords == item)[0][0]
             return (self.data.data[data_row])
-        elif isinstance(item, slice) or isinstance(item, np.ndarray):
-            return type(self)(self.data.data[coords[item]])
+        elif isinstance(item, slice):
+            slice_start = item.start
+            slice_stop = item.stop
+            slice_step = item.step
+            if slice_start and slice_start < 0:
+                slice_start = self.data.shape[0] + slice_start
+            if slice_stop and slice_stop < 0:
+                slice_stop = self.data.shape[0] + slice_stop
+
+            if slice_start and not slice_stop:
+                indices = item.indices(slice_start)
+            elif slice_stop:
+                indices = item.indices(item.stop)
+            else:
+                indices = item.indices(self.shape[0])
+            start, end, step = indices
+            
+            values = []
+            for i in range(start, end, step):
+                if i not in coords:
+                    values.append(self.na_value)
+                else:
+                    idx = np.where(coords == i)[0]
+                    values.append(self.data.data[idx][0])
+            return type(self)(self._from_sequence(values))
+        elif isinstance(item, np.ndarray):
+            values = []
+            if isinstance(item[0], np.bool_):
+                for ind, value in enumerate(item):
+                    if value:
+                        if ind < 0:
+                            ind = self.data.shape[0] + ind
+                        if ind not in coords:
+                            values.append(self.na_value)
+                        else:
+                            idx = np.where(coords == ind)[0]
+                            values.append(self.data.data[idx][0])
+                return type(self)(self._from_sequence(values))
+            else:
+                for ind in item:
+                    ind = ind if ind >= 0 else self.shape[0] + ind
+                    if ind not in coords:
+                        values.append(self.na_value)
+                    else:
+                        idx = np.where(coords == ind)[0]
+                        values.append(self.data.data[idx][0])
+                return type(self)(self._from_sequence(values))
+
     
     def take(self, indices, allow_fill=False, fill_value=None):
-        print('take called with indices %s and allow_fill: %s, fill_value: %s' % (indices, allow_fill, fill_value))
-        #import pdb; pdb.set_trace()
         if self.shape[0] == 0 and not allow_fill:
             raise IndexError("cannot do a non-empty take")
             
@@ -152,21 +258,20 @@ class SparseExtensionArray(ExtensionArray):
         for i, ind in enumerate(indexer):
             coords = self.data.coords.ravel()
             if ind == -1 and allow_fill:
-                took[i] = fill_value #np.nan
+                took[i] = fill_value
             elif ind < 0 and not allow_fill:
-                #import pdb; pdb.set_trace()
                 ind = self.data.shape[0] + ind
                 if ind in coords:
                     data_row = np.where(coords == ind)[0][0]
                     took[i] = self.data.data[data_row]
                 else:
                     took[i] = fill_value
-            elif ind not in self.data.coords:
-                took[i] = fill_value
+            elif ind not in coords:
+                #took[i] = fill_value
+                took[i] = self.na_value
             else:
                 data_row = np.where(coords == ind)[0][0]
                 took[i] = self.data.data[data_row]
-                
         return type(self)(took)
     
     def take_nd(self, indexer, allow_fill=True, fill_value=None):
@@ -187,7 +292,6 @@ class SparseExtensionArray(ExtensionArray):
 
     @classmethod
     def _concat_same_type(cls, to_concat):
-        print("=====================================================concat called with %s=================" % to_concat)
         return SparseExtensionArray(coords=sparse.concatenate([array.data for array in to_concat]))
 
     def tolist(self):
@@ -199,7 +303,7 @@ class SparseExtensionArray(ExtensionArray):
     def unique(self):
         # type: () -> ExtensionArray
         # https://github.com/pandas-dev/pandas/pull/19869
-        return np.unique(self.data.data)
+        return self._from_sequence(np.unique(self.data.data))
     
     def __lt__(self, other):
         return self.data < other

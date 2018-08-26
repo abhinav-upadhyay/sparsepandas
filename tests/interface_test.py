@@ -18,7 +18,7 @@ def data():
 
 @pytest.fixture
 def data_missing():
-    arr = np.array([0, 2.0])
+    arr = np.array([0.0, 3.0])
     #arr[0] = np.nan
     return SparseExtensionArray(arr)
 
@@ -48,7 +48,7 @@ def data_for_grouping():
     a = 2 ** 32 + 1
     c = 2 ** 32 + 10
     return SparseExtensionArray([
-        b, b, 2, 2, a, a, b, c
+        b, b, 0.0, 0.0, a, a, b, c
     ])
 
 
