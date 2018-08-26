@@ -131,9 +131,14 @@ class SparseExtensionArray(ExtensionArray):
 
 
     def __iter__(self):
-        # Do we want to iterate through the full blown array or just the non-na values?
-        # something like [list(data[:3])] + [np.nan] can be handled better than this
-        return iter(self.data.todense().tolist())
+        coords = self.data.coords.ravel()
+        for i in range(self.shape[0]):
+            idx = np.where(coords == i)[0]
+            if len(idx) > 0:
+                yield self.data.data[idx[0]]
+            else:
+               yield self.na_value
+
  
 
 
