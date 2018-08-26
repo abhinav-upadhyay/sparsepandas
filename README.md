@@ -5,8 +5,6 @@ Inspired by the IPArray implementation from [cyberpandas](https://github.com/Con
 Example Usage
 ```python
 
-In [1]: import sparse
-
 In [2]: import numpy as np
 
 In [3]: import pandas as pd
@@ -17,7 +15,7 @@ In [5]: arr = np.random.random(20000)
 
 In [6]: arr[arr<0.9] = 0.0
 
-In [7]: sparse_arr = SparseExtensionArray(sparse_arr)
+In [7]: sparse_arr = SparseExtensionArray(arr)
 
 In [9]: df = pd.DataFrame({'sparse_col1': sparse_arr})
 
