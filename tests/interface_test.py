@@ -23,6 +23,14 @@ def data_missing():
     return SparseExtensionArray(arr)
 
 
+@pytest.fixture
+def data_repeated(data):
+    def gen(count):
+        for _ in range(count):
+            yield data
+    yield gen
+
+
 @pytest.fixture(params=['data', 'data_missing'])
 def all_data(request, data, data_missing):
     """Parametrized fixture giving 'data' and 'data_missing'"""
