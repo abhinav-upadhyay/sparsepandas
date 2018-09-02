@@ -1,3 +1,4 @@
+import sys
 from pandas.core.arrays import ExtensionArray, ExtensionOpsMixin
 from collections import Iterable
 from pandas.api.extensions import ExtensionDtype, take
@@ -5,6 +6,7 @@ from pandas.compat import set_function_name
 from pandas.core.dtypes.generic import ABCSeries, ABCIndexClass
 from pandas.core import ops
 from pandas.core.dtypes.dtypes import registry
+from pandas.core.dtypes.common import is_list_like, is_integer_dtype
 import sparse
 import operator
 import numpy as np
@@ -13,6 +15,7 @@ from numba.types import float64, Tuple, int64, void
 
 
 @jit(Tuple((int64[:, :], float64[:], int64))(int64[ :], float64[:], int64, int64, float64), parallel=True, nogil=True, nopython=True)
+#@jit(parallel=True, nogil=True, nopython=True)
 def _setitem(coords, data, shape, key, value):
     # TODO: This seems like a very slow way to do it
     data_iter = 0
@@ -48,9 +51,7 @@ def _setitem(coords, data, shape, key, value):
 
 
 class SparseArrayType(ExtensionDtype):
-    name = 'sparsetype'
-    type = float
-    na_value = 0.0
+    na_value = np.float(0.0)
 
     @classmethod
     def construct_from_string(cls, string):
@@ -69,20 +70,33 @@ class SparseArrayType(ExtensionDtype):
             raise NotImplementedError()
         return SparseExtensionArray
 
+    @property
+    def numpy_dtype(self):
+        """ Return an instance of our numpy dtype """
+        return np.dtype(self.type)
+
+    @property
+    def kind(self):
+        return self.numpy_dtype.kind
+
+
 class SparseExtensionArray(ExtensionArray, ExtensionOpsMixin):
-    _dtype = SparseArrayType()
     ndim = 1
     can_hold_na = True
-    kind = 'f'
 
-    def __init__(self, coords, data=None, shape=None):
+    def __init__(self, coords, data=None, dtype=None, shape=None):
+        if dtype is None and hasattr(data, 'dtype'):
+            if is_integer_dtype(data.dtype):
+                dtype = data.dtype
+
+        dtype = self._handle_dtype(dtype)
         if data is not None:
             self.data = sparse.COO(coords, data, fill_value=self.na_value, shape=shape)
         else:
             if isinstance(coords, sparse.COO):
                 self.data = coords
             elif not isinstance(coords, np.ndarray):
-                self.data = sparse.COO(np.array(coords, dtype=float), fill_value=self.na_value)
+                self.data = sparse.COO(np.array(coords, dtype=dtype), fill_value=self.na_value)
             else:
                 self.data = sparse.COO(coords, fill_value=self.na_value)
     
@@ -91,12 +105,26 @@ class SparseExtensionArray(ExtensionArray, ExtensionOpsMixin):
         return cls(data)
 
     @classmethod
+    def _handle_dtype(cls, dtype):
+        if dtype is not None:
+            if not issubclass(type(dtype), SparseArrayType):
+                try:
+                    #dtype = _dtypes[str(np.dtype(dtype))]
+                    dtype= SparseArrayType
+                except KeyError:
+                    raise ValueError("invalid dtype specified {}".format(dtype))
+        if dtype is not None:
+            dtype = dtype.numpy_dtype
+        return dtype
+
+
+    @classmethod
     def _from_pyints(cls, values):
         return cls(np.array(values))
     
     @property
     def na_value(self):
-        return self.dtype.na_value
+        return SparseArrayType.na_value
     
     def __repr__(self):
         return "%s : %s" % (self.dtype.name, self.data.data)
@@ -181,12 +209,11 @@ class SparseExtensionArray(ExtensionArray, ExtensionOpsMixin):
 
     @property
     def dtype(self):
-        return self._dtype
+        return _dtypes[str(self.data.dtype)]
     
     @classmethod
-    def _from_sequence(cls, scalars, dtype=float, copy=False):
-        if isinstance(dtype, SparseArrayType):
-            dtype = float
+    def _from_sequence(cls, scalars, dtype=None, copy=False):
+        dtype = cls._handle_dtype(dtype)
         return SparseExtensionArray(np.array(scalars, dtype=dtype))
     
     @classmethod
@@ -218,21 +245,8 @@ class SparseExtensionArray(ExtensionArray, ExtensionOpsMixin):
             data_row = np.where(coords == item)[0][0]
             return (self.data.data[data_row])
         elif isinstance(item, slice):
-            slice_start = item.start
-            slice_stop = item.stop
-            if slice_start and slice_start < 0:
-                #slice_start = self.data.shape[0] + slice_start
-                slice_start = self.shape[0]
-            if slice_stop and slice_stop < 0:
-                slice_stop = self.data.shape[0] + slice_stop
-            if slice_start and not slice_stop:
-                indices = item.indices(slice_start)
-            elif slice_stop:
-                indices = item.indices(item.stop)
-            else:
-                indices = item.indices(self.shape[0])
+            indices = item.indices(self.shape[0])
             start, end, step = indices
-            
             values = []
             for i in range(start, end, step):
                 if i not in coords:
@@ -295,9 +309,9 @@ class SparseExtensionArray(ExtensionArray, ExtensionOpsMixin):
             indexer.append(x)
         took = np.full((len(indexer)), fill_value, dtype=float)
 
-
+        coords = self.data.coords.ravel()
         for i, ind in enumerate(indexer):
-            coords = self.data.coords.ravel()
+            #TODO we don't need to set took[i] = fill_value as the array is initialised with fill_value
             if ind == -1 and allow_fill:
                 took[i] = fill_value
             elif ind < 0 and not allow_fill:
@@ -345,19 +359,19 @@ class SparseExtensionArray(ExtensionArray, ExtensionOpsMixin):
         return self._from_sequence(np.unique(self.data.data))
     
     def __lt__(self, other):
-        return self.data < other
+        return self.data < other.data
 
     def __le__(self, other):
-        return self.data <= other
+        return self.data <= other.data
 
     def __eq__(self, other):
         return self.data.data == other.data.data and self.data.coords == other.data.coords
 
     def __ge__(self, other):
-        return other <= self
+        return other.data <= self.data
 
     def __gt__(self, other):
-        return other < self
+        return other.data < self.data
 
     def equals(self, other):
         if not isinstance(other, type(self)):
@@ -368,98 +382,528 @@ class SparseExtensionArray(ExtensionArray, ExtensionOpsMixin):
         return np.array(self.data.todense(), copy=copy, dtype=dtype)
 
     @classmethod
+    def _create_comparison_method(cls, op):
+        op_name = op.__name__
+        #print(op_name)
+        def cmp_method(self, other):
+            if is_list_like(other):
+                other = cls._from_sequence(other)
+
+            if other.ndim > 0 and len(self) != len(other):
+                raise ValueError("Lengths must match to compare")
+
+            if op_name == 'eq':
+                return SparseExtensionArray(self.data == other.data)
+            if op_name == 'ne':
+                return SparseExtensionArray(self.data != other.data)
+            if op_name == 'lt':
+                return SparseExtensionArray(self.data < other.data)
+            if op_name == 'gt':
+                return SparseExtensionArray(self.data > other.data)
+            if op_name == 'le':
+                return SparseExtensionArray(self.data <= other.data)
+            if op_name == 'ge':
+                return SparseExtensionArray(self.data >= other.data)
+
+        opname = ops._get_op_name(op, True)
+        return set_function_name(cmp_method, opname, cls)
+
+
+
+    @classmethod
     def _create_arithmetic_method(cls, op):
         #print('op name: %s' % op.__name__)
         def sparse_arithmetic_method(self, other):
             op_name = op.__name__
             if op_name == 'add':
-                coords,data = _sum2(self.data.coords[0], self.data.data, other.values.data.coords[0], other.values.data.data)
+                coords,data = _sum(self.data.coords[0], self.data.data, other.values.data.coords[0], other.values.data.data)
                 coo = sparse.COO(coords, data, shape=self.shape)
                 return SparseExtensionArray(coo)
 
         opname = ops._get_op_name(op, True)
         return set_function_name(sparse_arithmetic_method, opname, cls)
 
-@jit(Tuple((int64[:, :], float64[:]))(int64[ :], float64[:], int64[ :], float64[:]),  nogil=True, nopython=True)
-def _sum2(coords1, data1, coords2, data2):
+
+@jit(nogil=True, nopython=True, cache=True, error_model='numpy')
+def _sum(coords1, data1, coords2, data2):
     iter1 = 0
     iter2 = 0
     len1 = coords1.shape[0]
     len2 = coords2.shape[0]
-    out_coords = np.empty(len1 + len2, dtype=np.int64)
-    out_data = np.empty(len1 + len2)
-    index = 0
-    while not (iter1 == len1 and iter2 == len2):
+    alloc_length = len1 + len2
+    ret_out_coords = np.empty((1, alloc_length), dtype=np.int64)
+    out_coords = ret_out_coords[0]
+    out_data = np.empty(alloc_length)
+    c1 = coords1[0]
+    c2 = coords2[0]
+    for index in range(alloc_length):
         if iter1 < len1 and iter2 < len2:
-            c1 = coords1[iter1]
-            c2 = coords2[iter2]
+            #c1 = coords1[iter1]
+            #c2 = coords2[iter2]
+            if c1 < c2:
+                out_coords[index] = c1
+                out_data[index] = data1[iter1]
+                iter1 += 1
+                c1 = coords1[iter1] if iter1 < len1 else c1
+            elif c2 < c1 > 0:
+                out_coords[index] = c2
+                out_data[index] = data2[iter2]
+                iter2 += 1
+                c2 = coords2[iter2] if iter2 < len2 else c2
+            else:
+                out_coords[index] = c1
+                out_data[index] = data2[iter2] + data1[iter1]
+                iter1 += 1
+                iter2 += 1
+                c1 = coords1[iter1] if iter1 < len1 else c1
+                c2 = coords2[iter2] if iter2 < len2 else c2
+        elif iter1 <= len1:
+            end_index = index + len1 - iter1
+            out_coords[index: end_index] = coords1[iter1:]
+            out_data[index: end_index] = data1[iter1:]
+            return ret_out_coords[:, :end_index], out_data[:end_index]
+        else:
+            end_index = index + len2 - iter2
+            out_coords[index: end_index] = coords2[iter2:]
+            out_data[index: end_index] = data2[iter2:]
+            return ret_out_coords[:, :end_index], out_data[:end_index]
+    #out_data = out_data[:index]
+    #return ret_out_coords[:, :index], out_data
+
+#@profile
+#@jit(nogil=True, nopython=True, cache=True, error_model='numpy')
+def _sum6(coords1, data1, coords2, data2):
+    len1 = coords1.shape[0]
+    len2 = coords2.shape[0]
+    alloc_length = len1 + len2
+    ret_out_coords = np.empty((1, alloc_length), dtype=np.int64)
+    out_data = np.empty(alloc_length)
+    out_coords = ret_out_coords[0]
+    temp_out_coords = np.empty(alloc_length)
+    temp_out_data = np.empty(alloc_length)
+    temp_out_coords[:len1] = coords1[0:]
+    temp_out_data[:len1] = data1[:]
+    temp_out_coords[len1:] = coords2[0:]
+    temp_out_data[len1:] = data2[0:]
+    sorted_idx = np.argsort(temp_out_coords)
+
+    index = 0
+    i = 0
+    while i < len(sorted_idx) - 1:
+        idx = sorted_idx[i]
+        if idx !=  temp_out_coords[idx] == temp_out_coords[idx + 1]:
+            out_coords[index] = temp_out_coords[idx]
+            out_data[index] = temp_out_data[idx] + temp_out_data[idx + 1]
+            index += 1
+            i += 2
+        else:
+            out_coords[index] = temp_out_coords[idx]
+            out_data[index] = temp_out_data[idx]
+            i += 1
+            index += 1
+    return ret_out_coords[:, :index], out_data[:index]
+
+
+#@profile
+@jit(nogil=True, nopython=True, cache=True, error_model='numpy')
+def _sum5(coords1, data1, coords2, data2):
+    len1 = coords1.shape[0]
+    len2 = coords2.shape[0]
+    alloc_length = len1 + len2
+    ret_out_coords = np.empty((1, alloc_length), dtype=np.int64)
+    out_data = np.empty(alloc_length)
+    out_coords = ret_out_coords[0]
+    out_coords[:len1] = coords1[0:]
+    out_data[:len1] = data1[:]
+    out_coords[len1:] = coords2[0:]
+    out_data[len1:] = data2[0:]
+    #sorted_idx = np.argsort(out_coords)
+    #out_data = out_data[sorted_idx]
+    #out_coords = out_coords[sorted_idx]
+    index = 0
+    iter1 = 0
+    iter2 = len1
+    c1 = out_coords[iter1]
+    d1 = out_data[iter1]
+    c2 = out_coords[iter2]
+    d2 = out_data[iter2]
+    temp_coords = np.zeros(len1, dtype=np.int64)
+    temp_data = np.zeros(len1, dtype=np.float64)
+    temp_ind = 0
+    last_coord = max(coords1[-1], coords2[-1])
+    while True:
+        if c1 < c2:
+            if temp_coords[temp_ind] != 0:
+                out_coords[index] = temp_coords[temp_ind]
+                out_data[index] = temp_data[temp_ind]
+                temp_ind += 1
+            index += 1
+            if temp_coords[temp_ind] != 0:
+                c1 = temp_coords[temp_ind]
+                d1 = temp_data[temp_ind]
+            else:
+                iter1 += 1
+                c1 = out_coords[iter1]
+                d1 = out_data[iter1]
+            if c1 == last_coord or c2 == last_coord:
+                break
+            continue
+        if c1 > c2:
+            if out_coords[index] != c2:
+                temp_coords[temp_ind] = out_coords[index]
+                temp_data[temp_ind] = out_data[index]    
+                temp_ind += 1
+            out_coords[index] = c2
+            out_data[index] = d2
+            iter1 += 1
+            out_coords[index] = c2
+            out_data[index] = d2
+            iter2 += 1
+            index += 1
+            c2 = out_coords[iter2]
+            d2 = out_data[iter2]
+            if c2 == last_coord:
+                break
+            continue
+        if c1 == c2:
+            out_data[index] = d1 + d2
+            iter1 += 1
+            iter2 += 1
+            index += 1
+            c2 = out_coords[iter2]
+            d2 = out_data[iter2]
+            if temp_coords[temp_ind] == 0:
+                c1 = out_coords[iter1]
+                d1 = out_data[iter1]
+            else:
+                c1 = temp_coords[temp_ind]
+                d1 = temp_data[temp_ind]
+                temp_ind += 1
+            if c1 == last_coord or c2 == last_coord:
+                break
+    
+    while temp_ind != len1 or temp_coords[temp_ind] != 0:
+        out_coords[index] = temp_coords[temp_ind]
+        out_data[index] = temp_data[temp_ind]
+        index += 1
+        temp_ind += 1
+
+        
+    return ret_out_coords[:, :index], out_data[:index]
+
+@jit(nogil=True, nopython=True, cache=True, error_model='numpy')
+def _sum4(coords1, data1, coords2, data2):
+    #import pdb; pdb.set_trace()
+    iter1 = 0
+    iter2 = 0
+    len1 = coords1.shape[0]
+    len2 = coords2.shape[0]
+    alloc_length = len1 + len2
+    ret_out_coords = np.empty((1, alloc_length), dtype=np.int64)
+    out_coords = ret_out_coords[0]
+    out_data = np.empty(alloc_length)
+    index = 0
+    c1 = coords1[0]
+    c2 = coords2[0]
+    # print('len1')
+    # print(len1)
+    # print('len2')
+    # print(len2)
+    while iter1 <= len1 or iter2 <= len2:
+        # assert iter1 <= len1 or iter2 <= len2
+        if c1 == c2:
+            # print('==')
+            old_index = index
+            old_iter1 = iter1
+            old_iter2 = iter2
+            while True:
+                out_coords[index] = c1
+                index += 1
+                iter1 += 1
+                iter2 += 1
+                # print('index')
+                # print(index)
+                # print('iter1')
+                # print(iter1)
+                # print('iter2')
+                # print(iter2)
+                if iter1 >= len1:
+                    #n = iter1 - iter2
+                    #end_index = old_index + n
+                    # print('copying iter1 >= len1')
+                    # print('old_index')
+                    # print(old_index)
+                    # print('old_iter1')
+                    # print(old_iter1)
+                    out_data[old_index: index] = data1[old_iter1: iter1] + data2[old_iter2: iter2]
+                    #index = end_index
+                    break
+                if iter2 >= len2:
+                    #n = iter1 - iter2
+                    #end_index = old_index + n
+                    # print('copying iter2 >= len2')
+                    # print('old_index')
+                    # print(old_index)
+                    # print('old_iter2')
+                    # print(old_iter2)
+                    out_data[old_index: index] = data1[old_iter1: iter1] + data2[old_iter2: iter2]
+                    #index = end_index
+                    break
+                c1 = coords1[iter1]
+                c2 = coords2[iter2]
+                if c1 != c2:
+                    #n = iter1 - iter2
+                    #end_index = old_index + n
+                    out_data[old_index: index] = data1[old_iter1: iter1] + data2[old_iter2: iter2]
+                    #index = end_index
+                    break
+        if c1 < c2:
+            # print('<<')
+            old_index = index
+            old_iter1 = iter1
+            while True:
+                out_coords[index] = coords1[iter1]
+                index += 1
+                iter1 += 1
+                # print('index')
+                # print(index)
+                # print('iter1')
+                # print(iter1)
+                if iter1 >= len1:
+                    #n = iter1 - old_iter1
+                    #end_index = old_index + n
+                    # print('copying iter1 >= len1')
+                    # print('old_index')
+                    # print(old_index)
+                    # print('old_iter1')
+                    # print(old_iter1)
+                    out_data[old_index: index] = data1[old_iter1: iter1]
+                    # print('copied')
+                    #index = end_index
+                    break
+                c1 = coords1[iter1]
+                if c1 >= c2:
+                    #n = iter1 - old_iter1
+                    #end_index = old_index + n
+                    out_data[old_index: index] = data1[old_iter1: iter1]
+                    #index = end_index
+                    break
+        if c2 < c1:  
+            # print('>>')          
+            old_index = index
+            old_iter2 = iter2
+            while True:
+                out_coords[index] = coords2[iter2]
+                index += 1
+                iter2 += 1
+                # print('index')
+                # print(index)
+                # print('iter2')
+                # print(iter2)
+                if iter2 >= len2:
+                    #n = iter2 - old_iter2
+                    #end_index = old_index + n
+                    # print('copying iter2 >= len2')
+                    # print('old_index')
+                    # print(old_index)
+                    # print('old_iter2')
+                    # print(old_iter2)
+                    out_data[old_index: index] = data2[old_iter2: iter2]
+                    # print('copied')
+                    #index = end_index
+                    break
+                c2 = coords2[iter2]
+                if c2 >= c1:
+                    #n = iter2 - old_iter2
+                    #end_index = old_index + n
+                    out_data[old_index: index] = data2[old_iter2: iter2]
+                    #index = end_index
+                    break
+        
+        if iter1 >= len1 and iter2 < len2:
+            # print('1')
+            # print('iter1')
+            # print(iter1)
+            # print('iter2')
+            # print(iter2)
+            # print('len1')
+            # print(len1)
+            # print('len2')
+            # print(len2)
+            end_index = index + len2 - iter2
+            out_coords[index: end_index] = coords2[iter2:]
+            out_data[index: end_index] = data2[iter2:]
+            return ret_out_coords[:, :end_index], out_data[:end_index]
+            #break
+        
+        elif iter2 >= len2 and iter1 < len1:
+            # print('2')
+            end_index = index + len1 - iter1
+            out_coords[index: end_index] = coords1[iter1:]
+            out_data[index: end_index] = data1[iter1:]
+            return ret_out_coords[:, :end_index], out_data[:end_index]
+            #break
+        elif iter1 >= len1 and iter2 >= len2:
+            # print('3')
+            return ret_out_coords[:, :index], out_data[:index]
+            #break
+        # print('4')
+
+    
+    return ret_out_coords[:, :end_index], out_data[:end_index]
+            
+
+#@profile
+#jit(nogil=True, nopython=False, force_obj=True, cache=True, error_model='numpy')
+#jit(nogil=True, nopython=True, cache=True)
+def _sum3(coords1, data1, coords2, data2):
+    iter1 = 0
+    iter2 = 0
+    #index = 0
+    len1 = coords1.shape[0]
+    len2 = coords2.shape[0]
+    alloc_length = len1 + len2
+    ret_out_coords = np.empty((1, alloc_length), dtype=np.int64)
+    out_coords = ret_out_coords[0]
+    out_data = np.empty(alloc_length)
+    #while not (iter1 == len1 and iter2 == len2):
+    #while iter1 < len1 and iter2 < len2:
+    c1 = coords1[0]
+    c2 = coords2[0]
+    index = 0
+    while iter1 < len1 or iter2 < len2:
+        if iter1 < len1 and iter2 < len2:
             if c1 == c2:
                 out_coords[index] = c1
                 out_data[index] = data2[iter2] + data1[iter1]
-                index += 1
                 iter1 += 1
+                if iter1 >= len1:
+                    break
                 iter2 +=1
+                if iter2 >= len2:
+                    break
+                c1 = coords1[iter1]
+                c2 = coords2[iter2]
+                index += 1
             elif c1 < c2:
-                out_coords[index] = c1
-                out_data[index] = data1[iter1]
-                index += 1
-                iter1 += 1
+                old_iter = iter1
+                while True:
+                    iter1 += 1
+                    if iter1 >= len1:
+                        break
+                    c1 = coords1[iter1]
+                    if c1 >= c2:
+                        break
+                n = iter1 - old_iter
+                end_index = index + n
+                out_coords[index: end_index] = coords1[old_iter:iter1]
+                out_data[index: end_index] = data1[old_iter: iter1]
+                index = end_index
+                if iter1 >= len1:
+                    break
             else:
-                out_coords[index] = c2
-                out_data[index] = data2[iter2]
-                index += 1
-                iter2 += 1
+                old_iter = iter2
+                while True:
+                    iter2 += 1
+                    if iter2 >= len2:
+                        break
+                    c2 = coords2[iter2]
+                    if c2 >= c1:
+                        break
+                n = iter2 - old_iter
+                end_index = index + n
+                out_coords[index: end_index] = coords2[old_iter: iter2]
+                out_data[index: end_index] = data2[old_iter: iter2]
+                index = end_index
+                if iter2 >= len2:
+                    break
         elif iter1 < len1:
             end_index = index + len1 - iter1
             out_coords[index: end_index] = coords1[iter1:]
             out_data[index: end_index] = data1[iter1:]
             index = end_index
             break
+        #elif iter2 < len2:
         else:
             end_index = index + len2 - iter2
             out_coords[index: end_index] = coords2[iter2:]
             out_data[index: end_index] = data2[iter2:]
             index = end_index
             break
-    out_coords = np.expand_dims(out_coords[:index], 0)
     out_data = out_data[:index]
-    return out_coords, out_data
+    return ret_out_coords[:, :index], out_data
 
 
-
-@jit(Tuple((int64[:, :], float64[:]))(int64[ :], float64[:], int64[ :], float64[:]),  nogil=True, nopython=True)
-def _sum(coords1, data1, coords2, data2):
-    coords1_set = set(coords1)
-    out_coords = []
-    common_coords = []
-    out_data = []
-    for i, c in enumerate(coords2):
-        if c in coords1_set:
-            index = np.where(coords1 == c)[0][0]
-            out_data.append(data1[index] + data2[i])
-            common_coords.append(c)
+#@profile
+@jit(nogil=True, nopython=True, cache=True, fastmath=True)
+def _sum2(coords1, data1, coords2, data2):
+    iter = 0
+    len1 = coords1.shape[0]
+    len2 = coords2.shape[0]
+    ret_out_coords = np.empty((1, len1 + len2), dtype=np.int64)
+    out_coords = ret_out_coords[0]
+    out_data = np.empty(len1 + len2)
+    if coords1[-1] <= coords2[-1]:
+        finish_first_coords = coords1
+        finish_last_coords = coords2
+        finish_first_data = data1
+        finish_last_data = data2
+        finish_last_len = len2
+        finish_first_len = len1
+    else:
+        finish_first_coords = coords2
+        finish_last_coords = coords1
+        finish_first_data = data2
+        finish_last_data = data1
+        finish_last_len = len1
+        finish_first_len = len2
+    
+    i = 0
+    index = -1
+    c2 = finish_last_coords[0]
+    c1 = finish_first_coords[0]
+    while True:
+        #c2 = finish_last_coords[iter]
+        index += 1
+        if c1 == c2:
+            out_coords[index] = c1
+            out_data[index] = finish_first_data[i] + finish_last_data[iter]
+            if i == finish_first_len - 1:
+                break
+            i += 1
+            c1 = finish_first_coords[i]
+            iter += 1
+            c2 = finish_last_coords[iter]
+        elif c1 < c2:
+            out_coords[index] = c1
+            out_data[index] = finish_first_data[i]
+            if i == finish_first_len - 1:
+                break
+            i += 1
+            c1 = finish_first_coords[i]
         else:
-            out_data.append(data2[i])
-        out_coords.append(c)
+            out_coords[index] = c2
+            out_data[index] = finish_last_data[iter]
+            iter += 1
+            c2 = finish_last_coords[iter]
+    if iter < finish_last_len:
+        index += 1
+        end_index = index + finish_last_len - iter
+        out_coords[index: end_index] = finish_last_coords[iter:]
+        out_data[index: end_index] = finish_last_data[iter:]
+    return ret_out_coords[:, :end_index], out_data[:end_index]
 
-    common_coords_set = set(common_coords)
-    for i, c in enumerate(coords1):
-        if c in common_coords_set:
-            continue
-        out_data.append(data1[i])
-        out_coords.append(c)
+    
 
-    out_coords = np.array(out_coords)
-    out_coords = np.expand_dims(out_coords, 0)
-    return out_coords, np.array(out_data)
 
 
 SparseExtensionArray._add_arithmetic_ops()
+SparseExtensionArray._add_comparison_ops()
 registry.register(SparseArrayType)
-#SparseExtensionArray._add_comparison_ops()
 
 
-@jit(void(float64[:], int64[:], int64, float64), parallel=True, nogil=True, nopython=True)
+#@jit(void(float64[:], int64[:], int64, float64), parallel=True, nogil=True, nopython=True)
+@jit(cache=True, nogil=True, nopython=True)
 def iter(data, coords, length, na_value):
     coords_len = data.shape[0]
     coords_iter = 0
@@ -472,4 +916,26 @@ def iter(data, coords, length, na_value):
             val = data[coords_iter]
             coords_iter += 1
             yield val
-    
+
+module = sys.modules[__name__]
+_dtypes = {}
+for dtype in ['int8', 'int16', 'int32', 'int64', 'float32', 'float64', 'bool_', 'bool',
+              'uint8', 'uint16', 'uint32', 'uint64']:
+
+    if dtype == 'bool' or dtype == 'bool_':
+        name = 'bool'
+        np_type = getattr(np, 'bool_')
+    elif dtype.startswith('u'):
+        name = "U{}".format(dtype[1:].capitalize())
+        np_type = getattr(np, dtype)
+    else:
+        name = dtype.capitalize()
+        np_type = getattr(np, dtype)
+    classname = "{}Dtype".format(name)
+    attributes_dict = {'type': np_type,
+                        'name': name}
+    dtype_type = type(classname, (SparseArrayType, ), attributes_dict)
+    setattr(module, classname, dtype_type)
+    # register
+    registry.register(dtype_type)
+    _dtypes[dtype] = dtype_type()
