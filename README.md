@@ -36,3 +36,6 @@ In [13]: %timeit df.sum()
 1.6 ms ± 13.3 µs per loop (mean ± std. dev. of 7 runs, 1000 loops each)
 
 ```
+
+#### Requirements for using
+requirements.txt lists the requirements (pytest and hypothesis are needed for running tests), apart from that it depends on the development version of Pandas and sparse modules.
